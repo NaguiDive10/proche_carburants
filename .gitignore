@@ -220,9 +220,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 # --- Projet proche_carburants ---
-# L'instantane de reference est versionne pour qu'un simple clone suffise a
-# faire tourner le pipeline, sans appel reseau. Tout autre fichier depose dans
-# data/raw/ reste ignore : les exports rafraichis par src/download_raw.py
-# remplacent le fichier en place et ne doivent pas s'accumuler dans le depot.
-data/raw/*
-!data/raw/prix-des-carburants-en-france-flux-instantane-v2.csv
+# Donnee source : volumineuse et retelechargeable depuis data.economie.gouv.fr.
+# Regle du projet : data/raw/ est en lecture seule et n'est jamais commite.
+data/raw/
