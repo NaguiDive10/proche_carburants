@@ -221,5 +221,6 @@ __marimo__/
 
 # --- Projet proche_carburants ---
 # Donnee source : volumineuse et retelechargeable depuis data.economie.gouv.fr.
-# Regle du projet : data/raw/ est en lecture seule et n'est jamais commite.
-data/raw/
+# Regle du projet : data/raw/ est en lecture seule et n'est jamais commite mais exceptionnellement, data/processed/ est commite pour permettre de partager les resultats de l'analyse.
+# data/raw/
+# data/processed/

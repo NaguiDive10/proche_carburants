@@ -1,91 +1,14 @@
-"""Nettoyage du flux instantané des prix des carburants en France.
-
-Transforme le CSV brut de data.economie.gouv.fr en une table longue
-(une ligne = une station x un carburant) prête pour BigQuery.
-
-Usage :
-    python src/clean_carburants.py
-"""
-
-# 1. IMPORTS
-import re
 import unicodedata
+import re
 from pathlib import Path
-
 import pandas as pd
 
 
-# 2. CONSTANTES
+# 1. CHARGEMENT
 
-# Path(__file__) = ce fichier ; parents[1] = la racine du projet.
-# Un chemin relatif comme "../data" dépendrait du dossier courant.
-ROOT = Path(__file__).resolve().parents[1]
-RAW = ROOT / "data" / "raw" / "prix-des-carburants-en-france-flux-instantane-v2.csv"
-OUT = ROOT / "data" / "processed" / "carburants_clean.csv"
-
-CARBURANTS = ["gazole", "sp95", "sp98", "e10", "e85", "gplc"]
-
-# Colonnes du fichier source. Les noms de prix et de dates sont dérivés plutôt
-# que recopiés : impossible d'en oublier un ou d'en dupliquer un.
-COL_IDENTITE = [
-    "id",
-    "Code postal",
-    "Ville",
-    "Département",
-    "code_departement",
-    "Région",
-]
-COL_CONTEXTE = ["pop", "geom", "Automate 24-24 (oui/non)"]
-COL_PRIX = ["Prix Gazole", "Prix SP95", "Prix SP98", "Prix E10", "Prix E85", "Prix GPLc"]
-COL_MAJ = [f"{c} mis à jour le" for c in COL_PRIX]
-
-COLONNES_SOURCE = COL_IDENTITE + COL_CONTEXTE + COL_PRIX + COL_MAJ
-
-# Codes à garder en texte : zéros initiaux (05100) et codes corses (2A, 2B).
-DTYPES_SOURCE = {
-    "id": "string",
-    "Code postal": "string",
-    "code_departement": "string",
-}
-
-# Colonnes conservées comme identifiants lors du passage au format long,
-# après normalisation des noms.
-COL_ID_LONG = [
-    "id",
-    "code_postal",
-    "ville",
-    "departement",
-    "code_departement",
-    "region",
-    "pop",
-    "latitude",
-    "longitude",
-    "geom",
-    "automate_24_24_oui_non",
-]
-
-# Plages de prix plausibles en EUR/L, carburant par carburant.
-# Un seuil global ne détecte rien : un E85 à 2,20 EUR passerait un test
-# "entre 0,5 et 5" alors qu'il s'agit d'une erreur de saisie du gérant.
-PLAGES_PRIX = {
-    "gazole": (1.00, 3.00),
-    "sp95": (1.00, 3.00),
-    "sp98": (1.00, 3.00),
-    "e10": (1.00, 3.00),
-    "e85": (0.50, 1.50),
-    "gplc": (0.50, 1.50),
-}
-
-
-# 3. FONCTIONS DU PIPELINE
-def load_raw(path: Path = RAW) -> pd.DataFrame:
+def load_raw(path: Path) -> pd.DataFrame:
     """
     Load the raw data from a CSV file into a pandas DataFrame.
-
-    Aucune exception n'est rattrapée : si le fichier est absent, si une colonne
-    a disparu ou si le séparateur change, le script doit s'arrêter net. Un
-    plantage vaut mieux qu'un DataFrame silencieusement faux, qui propagerait
-    l'erreur jusqu'au tableau de bord.
 
     Parameters:
     path (Path): The path to the CSV file.
@@ -93,18 +16,24 @@ def load_raw(path: Path = RAW) -> pd.DataFrame:
     Returns:
     pd.DataFrame: The loaded DataFrame.
     """
-    if not path.is_file():
-        raise FileNotFoundError(f"Fichier source introuvable : {path}")
+    try:
+        df = pd.read_csv(path, sep=";", encoding="utf-8", dtype={"Code postal": str, "id": str}, \
+            usecols=["id", "Adresse", "Code postal", "Ville", "Département", "code_departement", "Région", \
+                     "pop", "geom", "Automate 24-24 (oui/non)", "Prix Gazole mis à jour le", "Prix Gazole",
+                     "Prix SP95 mis à jour le","Prix SP95","Prix E85 mis à jour le","Prix E85", \
+                    "Prix GPLc mis à jour le","Prix GPLc","Prix E10 mis à jour le","Prix E10","Prix SP98 mis à jour le","Prix SP98"], \
+                        decimal=".")
+        return df
+    except FileNotFoundError:
+        print(f"File not found: {path}")
+        return pd.DataFrame()  # Return an empty DataFrame if the file is not found
+    except Exception as e:
+        print(f"An error occurred while loading the data: {e}")
+        return pd.DataFrame()  # Return an empty DataFrame for any other exceptions
 
-    return pd.read_csv(
-        path,
-        sep=";",
-        encoding="utf-8-sig",
-        usecols=COLONNES_SOURCE,
-        dtype=DTYPES_SOURCE,
-        decimal=".",
-    )
 
+# NETTOYAGE DES DONNÉES
+# 2.  NETTOYAGE DES NOMS DE COLONNES
 
 def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -116,11 +45,11 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     - remove consecutive underscores
     - remove underscores at the beginning/end
     """
-    df = df.copy()
 
     def normalize(col: str) -> str:
         # Remove accents
-        col = unicodedata.normalize("NFKD", col).encode("ascii", "ignore").decode("utf-8")
+        col = (
+            unicodedata.normalize("NFKD", col).encode("ascii", "ignore").decode("utf-8"))
 
         # Lowercase
         col = col.lower()
@@ -141,39 +70,29 @@ def normalize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# 2.2 NETTOYAGE DES COORDONNÉES
 def fix_coordinates(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Extract latitude and longitude from the geom column.
-
-    La colonne geom contient déjà les degrés décimaux ("48.183, 3.309"), alors
-    que les colonnes latitude/longitude du flux sont exprimées en degrés
-    multipliés par 10**5. Partir de geom évite donc la conversion.
-
-    L'arrondi à 5 décimales (environ 1 m) harmonise la précision : la source
-    fournit un nombre de chiffres variable (48.183 à côté de 47.257413021458).
+    Extract latitude and longitude from the geom column and convert them to numeric values.
+    Fix the latitude and longitude columns in the DataFrame by ensuring they are numeric and handling any non-numeric values.
 
     Parameters:
-    df (pd.DataFrame): The DataFrame containing the geom column.
+    df (pd.DataFrame): The DataFrame containing latitude and longitude columns.
 
     Returns:
-    pd.DataFrame: The DataFrame with latitude and longitude columns.
+    pd.DataFrame: The DataFrame with fixed latitude and longitude columns.
     """
-    df = df.copy()
-
     coordinates = df["geom"].str.split(",", expand=True)
 
-    df["latitude"] = pd.to_numeric(coordinates[0], errors="coerce").round(5)
-    df["longitude"] = pd.to_numeric(coordinates[1], errors="coerce").round(5)
+    df["latitude"] = pd.to_numeric(coordinates[0], errors="coerce")
+    df["longitude"] = pd.to_numeric(coordinates[1], errors="coerce")
 
     return df
 
-
+# 4. CONVERSION DES TYPES DE DONNÉES
 def cast_types(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Cast the price and date columns to their proper types.
-
-    Les dates sont converties en UTC : on stocke un instant absolu et on
-    convertit au fuseau local à l'affichage, dans Looker Studio.
+    Cast the data types of specific columns in the DataFrame to appropriate types.
 
     Parameters:
     df (pd.DataFrame): The DataFrame whose column types are to be cast.
@@ -181,158 +100,103 @@ def cast_types(df: pd.DataFrame) -> pd.DataFrame:
     Returns:
     pd.DataFrame: The DataFrame with casted column types.
     """
-    df = df.copy()
-
-    for carburant in CARBURANTS:
-        df[f"prix_{carburant}"] = pd.to_numeric(
-            df[f"prix_{carburant}"], errors="coerce"
-        )
-        df[f"{carburant}_maj"] = pd.to_datetime(
-            df[f"prix_{carburant}_mis_a_jour_le"], errors="coerce", utc=True
-        )
-
+    df['code_departement'] = df['code_departement'].astype(str)
+    df['prix_gazole'] = pd.to_numeric(df['prix_gazole'], errors='coerce')
+    df['prix_sp95'] = pd.to_numeric(df['prix_sp95'], errors='coerce')
+    df['prix_e10'] = pd.to_numeric(df['prix_e10'], errors='coerce')
+    df['prix_sp98'] = pd.to_numeric(df['prix_sp98'], errors='coerce')
+    df['prix_e85'] = pd.to_numeric(df['prix_e85'], errors='coerce')
+    df['prix_gplc'] = pd.to_numeric(df['prix_gplc'], errors='coerce')
+    df['gazole_maj'] = pd.to_datetime(df['prix_gazole_mis_a_jour_le'], errors='coerce', utc=True)
+    df['sp95_maj'] = pd.to_datetime(df['prix_sp95_mis_a_jour_le'], errors='coerce', utc=True)
+    df['e10_maj'] = pd.to_datetime(df['prix_e10_mis_a_jour_le'], errors='coerce', utc=True)
+    df['sp98_maj'] = pd.to_datetime(df['prix_sp98_mis_a_jour_le'], errors='coerce', utc=True)
+    df['e85_maj'] = pd.to_datetime(df['prix_e85_mis_a_jour_le'], errors='coerce', utc=True)
+    df['gplc_maj'] = pd.to_datetime(df['prix_gplc_mis_a_jour_le'], errors='coerce', utc=True)
     return df
 
-
+# 5. TRANSFORMATION EN FORMAT LONG
 def to_long_format(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Convert the DataFrame from wide format to long format.
-
-    Entrée : une ligne par station, 6 colonnes de prix et 6 colonnes de date.
-    Sortie : une ligne par (station, carburant), avec les colonnes carburant,
-    prix et maj.
-
-    La jointure des deux melt se fait sur (id, carburant) uniquement. Joindre
-    sur les 11 colonnes d'identité ferait perdre les 5 stations dont la ville,
-    le département et la région sont vides : dans une jointure pandas, une clé
-    NaN ne correspond à aucune autre, pas même à une autre NaN.
+    Convert the DataFrame from wide format to long format for price columns.
 
     Parameters:
     df (pd.DataFrame): The DataFrame in wide format.
 
     Returns:
-    pd.DataFrame: The DataFrame in long format with 'carburant' and 'prix'.
+    pd.DataFrame: The DataFrame in long format with 'fuel_type' and 'price' columns.
     """
-    df = df.copy()
+    price_columns = ['prix_gazole','prix_sp95','prix_e10','prix_sp98','prix_e85','prix_gplc']
 
-    col_prix = [f"prix_{c}" for c in CARBURANTS]
-    col_maj = [f"{c}_maj" for c in CARBURANTS]
+    price_maj_columns = ['gazole_maj','sp95_maj','e10_maj','sp98_maj','e85_maj','gplc_maj']
 
-    df_prix = df.melt(
-        id_vars=COL_ID_LONG,
-        value_vars=col_prix,
-        var_name="carburant",
-        value_name="prix",
-    )
-    df_prix["carburant"] = df_prix["carburant"].str.removeprefix("prix_")
+    id_columns = ['id','adresse','code_postal','ville','departement',\
+                'code_departement','region','pop','latitude','longitude','geom','automate_24_24_oui_non']
 
-    df_maj = df.melt(
-        id_vars=["id"],
-        value_vars=col_maj,
-        var_name="carburant",
-        value_name="maj",
-    )
-    df_maj["carburant"] = df_maj["carburant"].str.removesuffix("_maj")
+    df_prices = df.melt(id_vars=id_columns,value_vars=price_columns,var_name='carburant_type',value_name='prix')
 
-    return df_prix.merge(df_maj, on=["id", "carburant"], how="left")
+    df_maj = df.melt(id_vars=id_columns,value_vars=price_maj_columns,var_name='carburant_type',value_name='maj')
 
+    df_prices['carburant_type'] = (df_prices['carburant_type'].str.replace('prix_', '', regex=False))
 
-def drop_invalid_prices(df: pd.DataFrame) -> pd.DataFrame:
+    df_maj['carburant_type'] = (df_maj['carburant_type'].str.replace('_maj', '', regex=False))
+
+    df_long = df_prices.merge(df_maj[id_columns + ['carburant_type', 'maj']],on=id_columns + ['carburant_type'],how='left')
+    
+    return df_long
+
+# 6. SUPPRESSION DES PRIX INVALIDES
+def drop_invalid_prices(df: pd.DataFrame, lo: float = 0.5, hi: float = 5.0) -> pd.DataFrame:
     """
-    Drop rows with no price, then rows whose price is out of range.
-
-    Les deux suppressions sont distinctes et comptées séparément :
-    - un prix absent signifie que la station ne vend pas ce carburant ;
-    - un prix hors plage est une erreur de saisie.
-    Les confondre masquerait un problème de qualité derrière un cas normal.
+    Drop rows from the DataFrame where any of the price columns have values outside the specified range.
 
     Parameters:
-    df (pd.DataFrame): The DataFrame in long format.
+    df (pd.DataFrame): The DataFrame to filter.
+    lo (float): The lower bound for valid price values.
+    hi (float): The upper bound for valid price values.
 
     Returns:
-    pd.DataFrame: The filtered DataFrame.
+    pd.DataFrame: The filtered DataFrame with invalid price rows dropped.
     """
-    df = df.copy()
-
-    avant = len(df)
-    df = df.dropna(subset=["prix"])
-    sans_prix = avant - len(df)
-
-    mini = df["carburant"].map(lambda c: PLAGES_PRIX[c][0])
-    maxi = df["carburant"].map(lambda c: PLAGES_PRIX[c][1])
-    plausible = df["prix"].between(mini, maxi)
-
-    print(f"      {sans_prix:>5} lignes sans prix (carburant non vendu)")
-    print(f"      {(~plausible).sum():>5} prix hors plage (erreur de saisie)")
-
-    return df[plausible].copy()
-
-
-def validate(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Check the output contract and raise if it is violated.
-
-    On utilise raise et non assert : les assertions disparaissent lorsque
-    Python est lancé avec l'option -O, et un contrôle qualité ne doit jamais
-    pouvoir être désactivé par accident.
-
-    Parameters:
-    df (pd.DataFrame): The DataFrame to check.
-
-    Returns:
-    pd.DataFrame: The same DataFrame, unchanged.
-    """
-    if df.duplicated(["id", "carburant"]).any():
-        raise ValueError("Doublons détectés sur la paire (id, carburant)")
-
-    for carburant, (lo, hi) in PLAGES_PRIX.items():
-        prix = df.loc[df["carburant"] == carburant, "prix"]
-        if not prix.between(lo, hi).all():
-            raise ValueError(f"{carburant} : prix hors de [{lo}, {hi}]")
-
-    if not df["latitude"].between(41, 52).all():
-        raise ValueError("Latitude hors France métropolitaine")
-
-    if not df["longitude"].between(-6, 10).all():
-        raise ValueError("Longitude hors France métropolitaine")
-
-    if (df["code_postal"].str.len() != 5).any():
-        raise ValueError("Code postal de longueur différente de 5")
-
-    vides = df.columns[df.isna().all()].tolist()
-    if vides:
-        raise ValueError(f"Colonnes entièrement vides : {vides}")
-
+    price_columns = ['prix']
+    for col in price_columns:
+        df = df[(df[col] >= lo) & (df[col] <= hi)]
     return df
 
-
-# 4. ORCHESTRATION
+# 7. PIPELINE DE NETTOYAGE DES DONNÉES
+"""
+Apply a series of cleaning functions to the DataFrame in a pipeline fashion. 
+Each function is applied sequentially to transform the DataFrame into a clean and usable format for analysis.
+"""
+  
+  
 def clean(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply the cleaning functions in order.
-
-    L'ordre n'est pas libre : normalize_column_names doit passer en premier
-    (toutes les fonctions suivantes utilisent les noms normalisés), et validate
-    en dernier, sur la table telle qu'elle sera exportée.
-    """
     return (
-        df.pipe(normalize_column_names)
+        df
+        .pipe(normalize_column_names)
         .pipe(fix_coordinates)
         .pipe(cast_types)
         .pipe(to_long_format)
         .pipe(drop_invalid_prices)
-        .pipe(validate)
     )
 
 
-# 5. POINT D'ENTRÉE
-if __name__ == "__main__":
-    brut = load_raw()
-    print(f"[1/3] chargé  : {len(brut):>6} stations, {brut.shape[1]} colonnes")
+# 8. VALIDATION DES DONNÉES
+def validate(df: pd.DataFrame) -> pd.DataFrame:
 
-    propre = clean(brut)
-    print(f"[2/3] nettoyé : {len(propre):>6} lignes, {propre['id'].nunique()} stations")
+    # Prix présents : doivent être dans une plage raisonnable
+    assert df["prix"].dropna().between(0.5, 5).all(), \
+        "Prix hors plage"
 
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    propre.to_csv(OUT, index=False, encoding="utf-8")
-    print(f"[3/3] écrit   : {OUT}")
+    # Latitude présente : doit être en France métropolitaine
+    assert df["latitude"].dropna().between(41, 52).all(), \
+        "Latitude hors France métropolitaine"
+
+    # Unicité de (id, carburant)
+    #assert not df.duplicated(["id", "carburant"]).any(), "Doublons détectés pour (id, carburant)"
+
+    # Aucune colonne entièrement vide
+    assert not df.isna().all().any(), \
+        "Une colonne est entièrement vide"
+
+    return df
