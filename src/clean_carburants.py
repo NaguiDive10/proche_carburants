@@ -133,15 +133,15 @@ def to_long_format(df: pd.DataFrame) -> pd.DataFrame:
     id_columns = ['id','adresse','code_postal','ville','departement',\
                 'code_departement','region','pop','latitude','longitude','geom','automate_24_24_oui_non']
 
-    df_prices = df.melt(id_vars=id_columns,value_vars=price_columns,var_name='carburant_type',value_name='prix')
+    df_prices = df.melt(id_vars=id_columns,value_vars=price_columns,var_name='carburant',value_name='prix')
 
-    df_maj = df.melt(id_vars=id_columns,value_vars=price_maj_columns,var_name='carburant_type',value_name='maj')
+    df_maj = df.melt(id_vars=id_columns,value_vars=price_maj_columns,var_name='carburant',value_name='maj')
 
-    df_prices['carburant_type'] = (df_prices['carburant_type'].str.replace('prix_', '', regex=False))
+    df_prices['carburant'] = (df_prices['carburant'].str.replace('prix_', '', regex=False))
 
-    df_maj['carburant_type'] = (df_maj['carburant_type'].str.replace('_maj', '', regex=False))
+    df_maj['carburant'] = (df_maj['carburant'].str.replace('_maj', '', regex=False))
 
-    df_long = df_prices.merge(df_maj[id_columns + ['carburant_type', 'maj']],on=id_columns + ['carburant_type'],how='left')
+    df_long = df_prices.merge(df_maj[id_columns + ['carburant', 'maj']],on=id_columns + ['carburant'],how='left')
     
     return df_long
 
@@ -200,3 +200,47 @@ def validate(df: pd.DataFrame) -> pd.DataFrame:
         "Une colonne est entièrement vide"
 
     return df
+
+# 9. ECRITURE DU RESULTAT
+
+# DEFAULT_RAW = Path("data/raw/prix-des-carburants-en-france-flux-instantane-v2.csv")
+# DEFAULT_PROCESSED = Path("data/processed/carburants_clean.csv")
+
+# Chemins resolus depuis l'emplacement de ce fichier, et non depuis le
+# repertoire de travail : les scripts fonctionnent donc qu'on les lance
+# depuis la racine du projet, depuis src/, ou depuis un notebook.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+DEFAULT_RAW = PROJECT_ROOT / "data" / "raw" / "prix-des-carburants-en-france-flux-instantane-v2.csv"
+DEFAULT_PROCESSED = PROJECT_ROOT / "data" / "processed" / "carburants_clean.csv"
+
+
+def save_processed(df: pd.DataFrame, dest: Path = DEFAULT_PROCESSED) -> Path:
+    """
+    Write the cleaned DataFrame to the processed data folder.
+
+    Parameters:
+    df (pd.DataFrame): The cleaned DataFrame.
+    dest (Path): Where to write the CSV file.
+
+    Returns:
+    Path: The path to the written file.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(
+        dest,
+        index=False,       # évite de créer une colonne parasite dans BigQuery
+        encoding="utf-8",  # pas de BOM en sortie
+        sep=",",           # standard pour l'ingestion BigQuery
+    )
+    return dest
+
+
+# 10. POINT D'ENTREE
+
+if __name__ == "__main__":
+    df = validate(clean(load_raw(DEFAULT_RAW)))
+    chemin = save_processed(df)
+    print(f"{len(df)} lignes ecrites dans {chemin}")
+

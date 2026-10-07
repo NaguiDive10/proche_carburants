@@ -2,3 +2,4 @@ jupyter==1.1.1
 numpy==2.5.3
 pandas==3.0.6 #permet d'exporter les dataframes en parquet (préférable à csv pour les gros volumes de données vers BigQuery)
 pyarrow==25.0.1
+requests==2.34.2 #telecharge le flux instantane depuis l'API de data.economie.gouv.fr (gzip et certificats geres automatiquement)
